@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+settings.json
+build/
+dist/
+smoke-out/
+*.spec

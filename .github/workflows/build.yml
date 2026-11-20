@@ -1,0 +1,53 @@
+name: بناء أبو وهب ونشره
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Smoke test (OCR + translation + overlay)
+        env:
+          PYTHONIOENCODING: utf-8
+          SMOKE_OUT: smoke-out
+        run: python tests/smoke_windows.py
+      - name: Build exe
+        run: >
+          pyinstaller --noconfirm --onedir --windowed --name AbuWahab
+          --icon icon.ico --add-data "fonts;fonts" --add-data "icon.ico;." --add-data "words_en.txt;."
+          --collect-submodules winrt main.py
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/AbuWahab/
+          Copy-Item docs/*.png dist/AbuWahab/
+          Compress-Archive -Path dist/AbuWahab/* -DestinationPath AbuWahab-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AbuWahab-Windows
+          path: AbuWahab-Windows.zip
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag AbuWahab-Windows.zip "docs/طريقة-التثبيت.png" `
+            --title "أبو وهب $tag" `
+            --notes-file docs/release-notes.md
