@@ -5,3 +5,6 @@ build/
 dist/
 smoke-out/
 *.spec
+translation_cache.json
+corrections.json
+log.txt

@@ -1,4 +1,4 @@
-"""خدمات الترجمة المجانية: جوجل ومايكروسوفت (بدون مفاتيح API).
+"""خدمات الترجمة المجانية: جوجل (أكثر من مدخل) وماي ميموري ومايكروسوفت (بدون مفاتيح API).
 
 كل دالة تأخذ نصاً إنجليزياً وترجع الترجمة العربية، أو ترمي استثناء عند الفشل.
 """
@@ -36,20 +36,105 @@ class RateLimited(RuntimeError):
     pass
 
 
-def google_translate(text: str, src: str = "en", dst: str = "ar") -> str:
-    r = _session.get(
-        "https://translate.googleapis.com/translate_a/single",
-        params={"client": "gtx", "sl": src, "tl": dst, "dt": "t", "q": text},
-        timeout=4,
-    )
-    if r.status_code == 429:
-        raise RateLimited("Google: too many requests")
+class _Throttle:
+    """فاصل بسيط بين الطلبات لنفس الخدمة — يقلل احتمال إن جوجل يوقف الجهاز."""
+
+    def __init__(self, gap):
+        self.gap = gap
+        self.next = 0.0
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            delay = self.next - now
+            self.next = max(now, self.next) + self.gap
+        if delay > 0:
+            time.sleep(delay)
+
+
+_g_throttle = _Throttle(0.35)
+
+
+def _google_gtx(text, src, dst):
+    r = _session.get("https://translate.googleapis.com/translate_a/single",
+                     params={"client": "gtx", "sl": src, "tl": dst, "dt": "t", "q": text}, timeout=4)
+    if r.status_code == 429 or "/sorry/" in r.url:
+        raise RateLimited("gtx 429")
+    r.raise_for_status()
+    return "".join(seg[0] for seg in r.json()[0] if seg and seg[0])
+
+
+def _google_dict(text, src, dst):
+    r = _session.get("https://clients5.google.com/translate_a/t",
+                     params={"client": "dict-chrome-ex", "sl": src, "tl": dst, "q": text}, timeout=4)
+    if r.status_code == 429 or "/sorry/" in r.url:
+        raise RateLimited("dict 429")
     r.raise_for_status()
     data = r.json()
-    out = "".join(seg[0] for seg in data[0] if seg and seg[0])
-    if not out.strip():
-        raise RuntimeError("Google: empty result")
-    return out.strip()
+    while isinstance(data, list) and data and isinstance(data[0], list):
+        data = data[0]
+    if isinstance(data, list):
+        data = data[0]
+    if isinstance(data, dict):  # شكل قديم للرد
+        data = "".join(x.get("trans", "") for x in data.get("sentences", []))
+    return str(data)
+
+
+def _google_mobile(text, src, dst):
+    import html as _html
+    r = _session.get("https://translate.google.com/m", params={"sl": src, "tl": dst, "q": text}, timeout=5)
+    if r.status_code == 429 or "/sorry/" in r.url:
+        raise RateLimited("mobile 429")
+    r.raise_for_status()
+    m = re.search(r'class="result-container">(.*?)</div>', r.text, re.S)
+    if not m:
+        raise RuntimeError("mobile: no result")
+    return _html.unescape(m.group(1))
+
+
+_G_ENDPOINTS = [("gtx", _google_gtx), ("dict", _google_dict), ("mobile", _google_mobile)]
+_g_down: dict[str, float] = {}
+
+
+def google_translate(text: str, src: str = "en", dst: str = "ar") -> str:
+    """جوجل من أكثر من مدخل: لو واحد وقّف الجهاز (429)، ننتقل للي بعده."""
+    errors = []
+    now = time.time()
+    order = [e for e in _G_ENDPOINTS if _g_down.get(e[0], 0) < now] or _G_ENDPOINTS[:1]
+    for name, fn in order:
+        _g_throttle.wait()
+        try:
+            out = fn(text, src, dst).strip()
+            if out:
+                _g_down.pop(name, None)
+                return out
+            errors.append(f"{name}: empty")
+        except RateLimited:
+            _g_down[name] = time.time() + 120
+            errors.append(f"{name}: 429")
+        except Exception as e:  # noqa: BLE001
+            _g_down[name] = time.time() + 10
+            errors.append(f"{name}: {str(e)[:60]}")
+    if all("429" in e for e in errors):
+        raise RateLimited("Google: too many requests (" + ", ".join(errors) + ")")
+    raise RuntimeError("Google: " + "; ".join(errors))
+
+
+def mymemory_translate(text: str, src: str = "en", dst: str = "ar") -> str:
+    """MyMemory: مجاني بدون حساب (حد يومي محدود) — يستخدم احتياط بس."""
+    r = _session.get("https://api.mymemory.translated.net/get",
+                     params={"q": text[:480], "langpair": f"{src}|{dst}"}, timeout=6)
+    if r.status_code == 429:
+        raise RateLimited("MyMemory: 429")
+    r.raise_for_status()
+    js = r.json()
+    out = (js.get("responseData") or {}).get("translatedText", "").strip()
+    if js.get("quotaFinished") or "MYMEMORY WARNING" in out.upper():
+        raise RateLimited("MyMemory: daily limit")
+    if not out:
+        raise RuntimeError("MyMemory: empty")
+    return out
 
 
 class _BingSession:
@@ -117,6 +202,7 @@ def microsoft_translate(text: str, src: str = "en", dst: str = "ar") -> str:
 
 ENGINES = {
     "google": ("جوجل", google_translate),
+    "mymemory": ("ماي ميموري", mymemory_translate),
     "microsoft": ("مايكروسوفت", microsoft_translate),
 }
 
@@ -181,9 +267,18 @@ class Corrections:
 class Translator:
     """يترجم بالخدمة المختارة، ويحوّل للثانية تلقائياً لو فشلت، مع ذاكرة للجمل المكررة وتصحيحات المستخدم."""
 
-    def __init__(self, engine: str = "google", corrections: Corrections | None = None):
+    def __init__(self, engine: str = "google", corrections: Corrections | None = None,
+                 cache_path: str | None = None):
         self.engine = engine
         self.cache: dict[str, str] = {}
+        self.cache_path = cache_path
+        self._unsaved = 0
+        if cache_path:
+            try:
+                with open(cache_path, encoding="utf-8") as f:
+                    self.cache = dict(json.load(f))
+            except Exception:  # noqa: BLE001
+                pass
         self.last_engine_used = engine
         self.corrections = corrections or Corrections()
         self.history: list[tuple[str, str]] = []  # آخر الترجمات للتصحيح
@@ -191,8 +286,24 @@ class Translator:
         self.down_until: dict[str, float] = {}  # خدمة معطلة مؤقتاً: نتجاوزها بدل ما ننتظرها
         self.last_error = ""
 
+    @staticmethod
+    def cache_key(text: str) -> str:
+        """قراءات متشابهة لنفس الجملة (فرق نقطة أو مسافة) = مفتاح واحد، فما ننطلب مرتين."""
+        return re.sub(r"[^a-z0-9']+", " ", text.lower()).strip()
+
+    def save_cache(self):
+        if not self.cache_path:
+            return
+        try:
+            items = list(self.cache.items())[-5000:]
+            with open(self.cache_path, "w", encoding="utf-8") as f:
+                json.dump(dict(items), f, ensure_ascii=False)
+            self._unsaved = 0
+        except Exception:  # noqa: BLE001
+            pass
+
     def _raw(self, text: str) -> str:
-        key = text.strip().lower()
+        key = self.cache_key(text)
         if key in self.cache:
             return self.cache[key]
         now = time.time()
@@ -204,20 +315,23 @@ class Translator:
                 out = ENGINES[name][1](text)
                 self.last_engine_used = name
                 self.down_until.pop(name, None)
-                if len(self.cache) > 3000:
-                    self.cache.clear()
                 self.cache[key] = out
+                self._unsaved += 1
+                if self._unsaved >= 10:
+                    self.save_cache()
                 return out
             except PermissionError as e:
                 self.down_until[name] = time.time() + 900  # مرفوضة: نوقفها ربع ساعة
                 errors.append(f"{name}: {e}")
             except RateLimited as e:
-                self.down_until[name] = time.time() + 20
+                self.down_until[name] = time.time() + 90
                 errors.append(f"{name}: {e}")
             except Exception as e:  # noqa: BLE001
                 self.down_until[name] = time.time() + 5
                 errors.append(f"{name}: {e}")
         self.last_error = " | ".join(errors)
+        if any("429" in e or "limit" in e or "too many" in e for e in errors):
+            raise RateLimited("جوجل موقّف الترجمة مؤقتاً بسبب كثرة الطلبات — ترجع لحالها خلال دقائق")
         raise RuntimeError(self.last_error)
 
     def translate(self, text: str) -> str:

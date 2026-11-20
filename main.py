@@ -38,7 +38,7 @@ new_mss = getattr(mss, "MSS", None) or mss.mss
 APP_NAME = "أبو وهب"
 APP_TAGLINE = "المبرمج الخطير لترجمة قراند يامعلم"
 GAME_NAME = "GTA VI"
-VERSION = "2.1"
+VERSION = "2.2"
 IS_WIN = sys.platform == "win32"
 
 # ---------------- الألوان ----------------
@@ -679,7 +679,7 @@ class RegionTracker:
         def done(ar, err):
             if err is not None:
                 log(f"  ERROR: {err}")
-                eng.status.emit(f"تعذرت الترجمة: {err}"[:160])
+                eng.status.emit(str(err)[:160] if "جوجل" in str(err) else f"تعذرت الترجمة: {err}"[:160])
                 if self.version == v:
                     self.last_text = ""
                 return
@@ -693,7 +693,7 @@ class RegionTracker:
 class AutoTracker:
     """يمسح صورة اللعبة كلها: يلقى كتل النص (الجوال، القوائم، الشروحات) ويترجم كل كتلة في مكانها."""
 
-    MAX_NEW = 8
+    MAX_NEW = 5
 
     def __init__(self, game):
         self.game = game
@@ -1648,7 +1648,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.s = load_settings()
         self.corrections = Corrections(data_path("corrections.json"))
-        self.translator = Translator(self.s["engine"], self.corrections)
+        self.translator = Translator(self.s["engine"], self.corrections, data_path("translation_cache.json"))
         self.engine = None
         self.editor = None
         self.overlay = OverlayManager(self.s)
@@ -1922,6 +1922,7 @@ class MainWindow(QWidget):
     def closeEvent(self, e):
         self.stop()
         save_settings(self.s)
+        self.translator.save_cache()
         QApplication.quit()
         super().closeEvent(e)
 

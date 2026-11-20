@@ -50,6 +50,11 @@ for key, (label, fn) in translators.ENGINES.items():
 if not ok_any:
     fails.append("no translation engine worked")
 
+for name, fn in translators._G_ENDPOINTS:
+    try:
+        print(f"google/{name}:", fn(line1, "en", "ar"))
+    except Exception as e:  # noqa: BLE001
+        print(f"google/{name} FAILED:", e)
 tr = translators.Translator("microsoft")
 print("Translator fallback:", tr.translate("Where is my money?"), "via", tr.last_engine_used)
 
