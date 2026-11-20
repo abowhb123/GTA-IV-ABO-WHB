@@ -55,4 +55,3 @@ jobs:
             gh release create $tag AbuWahab-Windows.zip "docs/طريقة-التثبيت.png" `
               --target $env:GITHUB_SHA --title "أبو وهب $tag" --notes-file docs/release-notes.md --latest
           }
-          exit 0
